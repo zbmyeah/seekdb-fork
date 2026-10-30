@@ -1,8 +1,20 @@
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false','1');
 ai_prompt('{0}+{1}={2} 吗？请回答true或false','1')
 {"args": ["1"], "template": "{0}+{1}={2} 吗？请回答true或false"}
-select ai_prompt('{0}+{1}={2} 吗？请回答true或false',json_object("a","1"));
-ERROR 0A000: json type is not supported not supported
+select json_type(json_extract(ai_prompt('{0}',json_object("a","1")), '$.args[0]'));
+json_type(json_extract(ai_prompt('{0}',json_object("a","1")), '$.args[0]'))
+OBJECT
+select json_type(json_extract(ai_prompt('{0}',json_array(1,2)), '$.args[0]'));
+json_type(json_extract(ai_prompt('{0}',json_array(1,2)), '$.args[0]'))
+ARRAY
+select json_type(json_extract(ai_prompt('外层{0}',ai_prompt('内层{0}','你好')), '$.args[0]'));
+json_type(json_extract(ai_prompt('外层{0}',ai_prompt('内层{0}','你好')), '$.args[0]'))
+OBJECT
+select json_unquote(json_extract(ai_prompt('世界 {{0}} {0}', '你好'), '$.template'));
+json_unquote(json_extract(ai_prompt('世界 {{0}} {0}', '你好'), '$.template'))
+世界 {{0}} {0}
+select ai_prompt('{0}', json_extract(json_array(1), '$[0]'));
+ERROR 22000: Invalid data type for the operation
 select ai_prompt();
 ERROR 42000: Incorrect parameter count in the call to native function 'ai_prompt'
 select ai_prompt(1);
@@ -51,11 +63,39 @@ ERROR 22000: Invalid data type for the operation
 select ai_prompt(a) from t1;
 ERROR 22000: Invalid data type for the operation
 select ai_prompt(b) from t1;
-ERROR 22000: Invalid data type for the operation
+ai_prompt(b)
+{"args": [], "template": "b"}
+{"args": [], "template": "bb"}
+{"args": [], "template": "bbb"}
+{"args": [], "template": "BBB"}
+{"args": [], "template": "bb"}
 select ai_prompt(c) from t1;
 ERROR 22000: Invalid data type for the operation
 select ai_prompt(d) from t1;
-ERROR 22000: Invalid data type for the operation
+ai_prompt(d)
+{"args": [], "template": "d"}
+{"args": [], "template": "dd"}
+{"args": [], "template": "ddd"}
+{"args": [], "template": "DDD"}
+{"args": [], "template": "dd"}
+select json_unquote(json_extract(ai_prompt(d, b), '$.args[0]')) from t1 order by nr;
+json_unquote(json_extract(ai_prompt(d, b), '$.args[0]'))
+b
+bb
+bbb
+BBB
+bb
+select length(json_unquote(json_extract(ai_prompt(d), '$.template'))) from t1 order by nr;
+length(json_unquote(json_extract(ai_prompt(d), '$.template')))
+1
+2
+3
+3
+2
+update t1 set d = repeat('x', 70000) where nr = 1;
+select length(json_unquote(json_extract(ai_prompt(d, b), '$.template'))) from t1 where nr = 1;
+length(json_unquote(json_extract(ai_prompt(d, b), '$.template')))
+70000
 drop table t1;
 drop table if exists t1;
 create table t1 (nr char(5), a varchar(10), b BINARY(20), c VARBINARY(20));

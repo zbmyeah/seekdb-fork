@@ -7,9 +7,13 @@ connection default;
 # 正确
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false','1');
 
-# not support
---error 1235 
-select ai_prompt('{0}+{1}={2} 吗？请回答true或false',json_object("a","1"));
+# JSON objects and arrays are kept as JSON arguments.
+select json_type(json_extract(ai_prompt('{0}',json_object("a","1")), '$.args[0]'));
+select json_type(json_extract(ai_prompt('{0}',json_array(1,2)), '$.args[0]'));
+select json_type(json_extract(ai_prompt('外层{0}',ai_prompt('内层{0}','你好')), '$.args[0]'));
+select json_unquote(json_extract(ai_prompt('世界 {{0}} {0}', '你好'), '$.template'));
+--error 5083
+select ai_prompt('{0}', json_extract(json_array(1), '$[0]'));
 
 
 # 无参数
@@ -29,7 +33,7 @@ select ai_prompt(json_object("a","1"));
 --error 5083
 select ai_prompt('{0}+{1}={2} 吗？请回答true或false',1);
 
-# 表达式支持类型  支持任意数量的输入，要求都是varchar长度内的字符串，不支持其他类型，不允许输入null
+# 表达式支持字符串、TEXT/LONGTEXT 和 JSON 参数，不允许输入 null
 # test  
 --disable_warnings
 drop table if exists t1;
@@ -48,8 +52,7 @@ select ai_prompt(c) from t1;
 drop table t1;
 
 
-# 表达式不支持的类型 
-# test  text/blob
+# TEXT/LONGTEXT 可用，二进制 BLOB 仍报类型错误
 --disable_warnings
 drop table if exists t1;
 --enable_warnings
@@ -64,12 +67,15 @@ insert into t1 values(7, 'AA', 'bb', 'CC', 'dd');
 select ai_prompt(nr) from t1;
 --error 5083
 select ai_prompt(a) from t1;
---error 5083
 select ai_prompt(b) from t1;
 --error 5083
 select ai_prompt(c) from t1;
---error 5083
 select ai_prompt(d) from t1;
+
+select json_unquote(json_extract(ai_prompt(d, b), '$.args[0]')) from t1 order by nr;
+select length(json_unquote(json_extract(ai_prompt(d), '$.template'))) from t1 order by nr;
+update t1 set d = repeat('x', 70000) where nr = 1;
+select length(json_unquote(json_extract(ai_prompt(d, b), '$.template'))) from t1 where nr = 1;
 
 drop table t1;
 

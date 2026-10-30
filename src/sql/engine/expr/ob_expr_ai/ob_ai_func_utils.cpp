@@ -18,6 +18,8 @@
 #include "ob_ai_func_utils.h"
 #include "ob_ai_func_client.h"
 #include "query/engine/expr/ob_ai_model_resolver.h"
+#include "lib/string/ob_sql_string.h"
+#include <limits>
 
 namespace oceanbase 
 {
@@ -1593,7 +1595,9 @@ bool ObAIFuncPromptObjectUtils::is_valid_prompt_object(ObJsonObject *prompt_obje
       ObJsonNode *node = args_array->get_value(i);
       if (OB_ISNULL(node)) {  
         is_valid = false;
-      } else if (node->json_type() != ObJsonNodeType::J_STRING && node->json_type() != ObJsonNodeType::J_OBJECT) {
+      } else if (node->json_type() != ObJsonNodeType::J_STRING &&
+                 node->json_type() != ObJsonNodeType::J_OBJECT &&
+                 node->json_type() != ObJsonNodeType::J_ARRAY) {
         is_valid = false;
       }
     }
@@ -1601,110 +1605,83 @@ bool ObAIFuncPromptObjectUtils::is_valid_prompt_object(ObJsonObject *prompt_obje
   return is_valid;
 }
 
-int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &allocator, ObJsonObject* prompt_object, ObString& replaced_prompt_str)
+namespace
+{
+int append_prompt(ObIAllocator &allocator, ObJsonObject *prompt_object,
+                  ObSqlString &result, int64_t depth)
 {
   INIT_SUCC(ret);
-  ObJsonString *template_json_str = NULL;
-  ObJsonArray *args_array = NULL;
-  ObString template_str;
-  ObString result_str;
-  if (OB_ISNULL(prompt_object) ||
-      OB_ISNULL(template_json_str = static_cast<ObJsonString *>(prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_template_key))) ||
-      OB_ISNULL(args_array = static_cast<ObJsonArray *>(prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key))) ||
-      OB_ISNULL(template_str = template_json_str->get_str()) ||
-      (template_str.empty())) {
+  if (depth > 32 || !ObAIFuncPromptObjectUtils::is_valid_prompt_object(prompt_object)) {
     ret = OB_INVALID_ARGUMENT;
   } else {
-    uint64_t args_count = args_array->element_count();
-    int64_t max_result_len = template_str.length();
-    char *result_buf = NULL;
-    for (uint64_t i = 0; OB_SUCC(ret) && i < args_count; i++) {
-      ObJsonNode *arg_node = args_array->get_value(i);
-      if (OB_NOT_NULL(arg_node) && arg_node->json_type() == ObJsonNodeType::J_STRING) {
-        ObJsonString *arg_str = static_cast<ObJsonString *>(arg_node);
-        max_result_len += arg_str->get_str().length();
-      } else {
-        ret = OB_INVALID_ARGUMENT;
-      }
-    }
-    if (OB_FAIL(ret)) {
-    } else if (OB_ISNULL(result_buf = static_cast<char *>(allocator.alloc(max_result_len)))) {
-      ret = OB_ALLOCATE_MEMORY_FAILED;
-    } else {
-      int64_t result_pos = 0;
-      const char *template_ptr = template_str.ptr();
-      int64_t template_len = template_str.length();
-      
-      for (int64_t i = 0; i < template_len && OB_SUCC(ret); i++) {
-        if (template_ptr[i] == '{') {
-          int64_t start_pos = i;
-          int64_t end_pos = start_pos;
-          bool found_end = false;
-          
-          for (int64_t j = start_pos + 1; j < template_len && !found_end; j++) {
-            if (template_ptr[j] == '}') {
-              end_pos = j;
-              found_end = true;
-            } else if (template_ptr[j] < '0' || template_ptr[j] > '9') {
-              break;
-            }
+    ObJsonString *template_node = static_cast<ObJsonString *>(
+        prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_template_key));
+    ObJsonArray *args = static_cast<ObJsonArray *>(
+        prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key));
+    const ObString tmpl = template_node->get_str();
+    for (int64_t i = 0; i < tmpl.length() && OB_SUCC(ret); ++i) {
+      const char ch = tmpl.ptr()[i];
+      if (ch == '\\' && i + 1 < tmpl.length() &&
+          (tmpl.ptr()[i + 1] == '{' || tmpl.ptr()[i + 1] == '}')) {
+        ret = result.append(tmpl.ptr() + i + 1, 1);
+        ++i;
+      } else if (ch == '{' && i + 1 < tmpl.length() && tmpl.ptr()[i + 1] == '{') {
+        ret = result.append("{", 1);
+        ++i;
+      } else if (ch == '}' && i + 1 < tmpl.length() && tmpl.ptr()[i + 1] == '}') {
+        ret = result.append("}", 1);
+        ++i;
+      } else if (ch == '{' && i + 1 < tmpl.length() &&
+                 tmpl.ptr()[i + 1] >= '0' && tmpl.ptr()[i + 1] <= '9') {
+        uint64_t index = 0;
+        int64_t end = i + 1;
+        bool overflow = false;
+        while (end < tmpl.length() && tmpl.ptr()[end] >= '0' && tmpl.ptr()[end] <= '9') {
+          const uint64_t digit = static_cast<uint64_t>(tmpl.ptr()[end] - '0');
+          if (index > (std::numeric_limits<uint64_t>::max() - digit) / 10) {
+            overflow = true;
+          } else if (!overflow) {
+            index = index * 10 + digit;
           }
-          
-          if (found_end && end_pos > start_pos + 1) {
-            ObString index_str;
-            index_str.assign_ptr(template_ptr + start_pos + 1, static_cast<int32_t>(end_pos - start_pos - 1));
-            
-            int64_t index = 0;
-            bool valid_index = true;
-            for (int64_t k = 0; k < index_str.length() && valid_index; k++) {
-              if (index_str.ptr()[k] >= '0' && index_str.ptr()[k] <= '9') {
-                index = index * 10 + (index_str.ptr()[k] - '0');
-              } else {
-                valid_index = false;
-              }
-            }
-            
-            if (valid_index && index >= 0 && static_cast<uint64_t>(index) < args_count) {
-              ObJsonNode *arg_node = args_array->get_value(static_cast<uint64_t>(index));
-              if (OB_NOT_NULL(arg_node) && arg_node->json_type() == ObJsonNodeType::J_STRING) {
-                ObJsonString *arg_str = static_cast<ObJsonString *>(arg_node);
-                ObString arg_value = arg_str->get_str();
-                
-                if (result_pos + arg_value.length() <= max_result_len) {
-                  MEMCPY(result_buf + result_pos, arg_value.ptr(), arg_value.length());
-                  result_pos += arg_value.length();
-                } else {
-                  ret = OB_BUF_NOT_ENOUGH;
-                }
-              } else {
-                //do nothing
-              }
-              
-              i = end_pos;
-            } else {
-              ret = OB_INVALID_ARGUMENT;
-              LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
-            }
-          } else {
-            if (result_pos < max_result_len) {
-              result_buf[result_pos++] = template_ptr[i];
-            } else {
-              ret = OB_BUF_NOT_ENOUGH;
-            }
-          }
-        } else {
-          if (result_pos < max_result_len) {
-            result_buf[result_pos++] = template_ptr[i];
-          } else {
-            ret = OB_BUF_NOT_ENOUGH;
-          }
+          ++end;
         }
-      }
-      
-      if (OB_SUCC(ret)) {
-        replaced_prompt_str.assign_ptr(result_buf, static_cast<int32_t>(result_pos));
+        if (end >= tmpl.length() || tmpl.ptr()[end] != '}') {
+          ret = result.append("{", 1);
+        } else if (overflow || index >= static_cast<uint64_t>(args->element_count())) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_prompt: invalid placeholder index");
+        } else {
+          ObJsonNode *arg = args->get_value(index);
+          if (arg->json_type() == ObJsonNodeType::J_STRING) {
+            ret = result.append(static_cast<ObJsonString *>(arg)->get_str());
+          } else if (arg->json_type() == ObJsonNodeType::J_OBJECT &&
+                     ObAIFuncPromptObjectUtils::is_valid_prompt_object(static_cast<ObJsonObject *>(arg))) {
+            ret = append_prompt(allocator, static_cast<ObJsonObject *>(arg), result, depth + 1);
+          } else {
+            ObJsonBuffer json_buf(&allocator);
+            if (OB_FAIL(arg->print(json_buf, false))) {
+            } else {
+              ret = result.append(json_buf.string());
+            }
+          }
+          i = end;
+        }
+      } else {
+        ret = result.append(&ch, 1);
       }
     }
+  }
+  return ret;
+}
+} // namespace
+
+int ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(ObIAllocator &allocator,
+    ObJsonObject *prompt_object, ObString &replaced_prompt_str)
+{
+  INIT_SUCC(ret);
+  ObSqlString result;
+  if (OB_FAIL(append_prompt(allocator, prompt_object, result, 0))) {
+  } else if (OB_FAIL(ob_write_string(allocator, result.string(), replaced_prompt_str))) {
   }
   return ret;
 }
